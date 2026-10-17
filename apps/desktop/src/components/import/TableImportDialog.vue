@@ -236,7 +236,10 @@ const updateExistingUnavailableReason = computed(() => {
   return "";
 });
 const canUpdateExistingRows = computed(() => updateExistingUnavailableReason.value === "");
-const conflictPolicyError = computed(() => (conflictPolicy.value === "updateExisting" ? updateExistingUnavailableReason.value : ""));
+// “插入或更新”与“更新已有行”同属 upsert，需要相同的主键映射前提；共用可用性判断。
+const canUpsertRows = computed(() => canUpdateExistingRows.value);
+const isUpsertConflictPolicy = computed(() => conflictPolicy.value === "updateExisting" || conflictPolicy.value === "insertOrUpdate");
+const conflictPolicyError = computed(() => (isUpsertConflictPolicy.value ? updateExistingUnavailableReason.value : ""));
 const requiredUnmappedColumns = computed(() =>
   requiredImportTargetColumns(
     targetColumns.value,
@@ -1714,6 +1717,9 @@ watch(rawProgressPercent, (percent) => {
               <option value="skip" class="bg-popover text-popover-foreground">{{ t("tableImport.skipDuplicateRows") }}</option>
               <option v-if="targetMode === 'existing'" value="updateExisting" :disabled="!canUpdateExistingRows" class="bg-popover text-popover-foreground">
                 {{ t("tableImport.updateExistingRows") }}
+              </option>
+              <option v-if="targetMode === 'existing'" value="insertOrUpdate" :disabled="!canUpsertRows" class="bg-popover text-popover-foreground">
+                {{ t("tableImport.insertOrUpdateRows") }}
               </option>
             </select>
             <p v-if="targetMode === 'existing' && !canUpdateExistingRows" class="text-[11px] text-muted-foreground">
