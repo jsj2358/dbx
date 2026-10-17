@@ -279,6 +279,14 @@ pub enum TableImportConflictPolicy {
     Error,
     Skip,
     UpdateExisting,
+    /// 动态“插入或更新”（upsert）：对每一行按主键判断——
+    /// 不存在则插入，已存在则更新，而不是固定执行插入或固定执行更新。
+    InsertOrUpdate,
+}
+
+/// 冲突策略是否属于需要目标主键的 upsert 语义（更新已有行 / 插入或更新）。
+fn is_upsert_conflict_policy(policy: TableImportConflictPolicy) -> bool {
+    matches!(policy, TableImportConflictPolicy::UpdateExisting | TableImportConflictPolicy::InsertOrUpdate)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -330,14 +338,14 @@ fn validate_update_existing_target(
     db_type: &DatabaseType,
     create_table: bool,
 ) -> Result<(), String> {
-    if conflict_policy != TableImportConflictPolicy::UpdateExisting {
+    if !is_upsert_conflict_policy(conflict_policy) {
         return Ok(());
     }
     if create_table {
-        return Err("Update-existing import requires an existing target table".to_string());
+        return Err("Insert-or-update import requires an existing target table".to_string());
     }
     if !supports_primary_key_upsert(db_type) {
-        return Err(format!("Update-existing import conflict policy is not supported for {}", db_type.as_str()));
+        return Err(format!("Insert-or-update import conflict policy is not supported for {}", db_type.as_str()));
     }
     Ok(())
 }
@@ -347,13 +355,13 @@ fn update_existing_primary_key_columns(
     mappings: &[TableImportColumnMapping],
     target_columns: &[crate::db::ColumnInfo],
 ) -> Result<Vec<String>, String> {
-    if conflict_policy != TableImportConflictPolicy::UpdateExisting {
+    if !is_upsert_conflict_policy(conflict_policy) {
         return Ok(Vec::new());
     }
 
     let primary_key_columns = target_columns.iter().filter(|column| column.is_primary_key).collect::<Vec<_>>();
     if primary_key_columns.is_empty() {
-        return Err("Update-existing import requires target primary-key metadata".to_string());
+        return Err("Insert-or-update import requires target primary-key metadata".to_string());
     }
 
     let mut mapped_primary_keys = Vec::with_capacity(primary_key_columns.len());
@@ -369,7 +377,7 @@ fn update_existing_primary_key_columns(
     }
     if !missing_primary_keys.is_empty() {
         return Err(format!(
-            "Update-existing import requires every primary-key column to be mapped; missing: {}",
+            "Insert-or-update import requires every primary-key column to be mapped; missing: {}",
             missing_primary_keys.join(", ")
         ));
     }
@@ -378,7 +386,7 @@ fn update_existing_primary_key_columns(
         !mapped_primary_keys.iter().any(|primary_key| primary_key.eq_ignore_ascii_case(&mapping.target_column))
     });
     if !has_mapped_non_primary_key {
-        return Err("Update-existing import requires at least one mapped non-primary-key column".to_string());
+        return Err("Insert-or-update import requires at least one mapped non-primary-key column".to_string());
     }
 
     Ok(mapped_primary_keys)
@@ -4843,7 +4851,7 @@ fn build_import_insert_batches_with_plan(
                 conflict_policy == TableImportConflictPolicy::Skip,
             )?
         }
-        TableImportConflictPolicy::UpdateExisting => {
+        TableImportConflictPolicy::UpdateExisting | TableImportConflictPolicy::InsertOrUpdate => {
             crate::data::transfer::generate_primary_key_upsert_sql_batches_from_value_rows(
                 &plan.target_columns,
                 &value_rows,
@@ -4939,7 +4947,7 @@ fn build_import_execution_batches(
             hard_sql_bytes,
         );
     }
-    if *db_type == DatabaseType::CloudflareD1 && conflict_policy != TableImportConflictPolicy::UpdateExisting {
+    if *db_type == DatabaseType::CloudflareD1 && !is_upsert_conflict_policy(conflict_policy) {
         return crate::db::cloudflare_d1::build_import_insert_batches(
             rows,
             columns,
@@ -7332,14 +7340,14 @@ where
     .await
     {
         Ok(columns) => columns,
-        Err(error) if conflict_policy == TableImportConflictPolicy::UpdateExisting => {
+        Err(error) if is_upsert_conflict_policy(conflict_policy) => {
             return Err(emit_import_error(
                 &mut progress_callback,
                 request,
                 0,
                 0,
                 started_at,
-                format!("Update-existing import could not load target primary-key metadata: {error}"),
+                format!("Insert-or-update import could not load target primary-key metadata: {error}"),
             ));
         }
         Err(_) => Vec::new(),
@@ -8618,6 +8626,97 @@ mod tests {
             validate_update_existing_target(TableImportConflictPolicy::UpdateExisting, &DatabaseType::Oracle, false)
                 .unwrap_err();
         assert!(unsupported.contains("not supported for oracle"));
+    }
+
+    #[test]
+    fn insert_or_update_deserializes_and_routes_to_upsert_policy() {
+        let request_json = serde_json::json!({
+            "importId": "imp-upsert-1",
+            "connectionId": "conn-1",
+            "database": "db1",
+            "schema": "public",
+            "table": "users",
+            "filePath": "users.csv",
+            "mappings": [],
+            "mode": "append",
+            "batchSize": 500,
+            "conflictPolicy": "insertOrUpdate"
+        });
+        let request: TableImportRequest = serde_json::from_value(request_json).unwrap();
+        assert_eq!(request.effective_conflict_policy(), TableImportConflictPolicy::InsertOrUpdate);
+        assert!(is_upsert_conflict_policy(TableImportConflictPolicy::InsertOrUpdate));
+        assert!(!is_upsert_conflict_policy(TableImportConflictPolicy::Error));
+    }
+
+    #[test]
+    fn insert_or_update_progress_counts_source_rows_not_database_affected_rows() {
+        // ON CONFLICT DO UPDATE may report two affected rows per changed row;
+        // the import progress must still reflect the source rows submitted.
+        assert_eq!(completed_import_rows(TableImportConflictPolicy::InsertOrUpdate, 3, 6), 3);
+    }
+
+    #[test]
+    fn insert_or_update_requires_existing_supported_table_and_complete_primary_key_mapping() {
+        let mappings = vec![
+            TableImportColumnMapping {
+                source_column: "tenant".to_string(),
+                target_column: "tenant_id".to_string(),
+                target_data_type: None,
+            },
+            TableImportColumnMapping {
+                source_column: "name".to_string(),
+                target_column: "name".to_string(),
+                target_data_type: None,
+            },
+        ];
+        let target_columns = vec![
+            crate::db::ColumnInfo { name: "tenant_id".to_string(), is_primary_key: true, ..Default::default() },
+            crate::db::ColumnInfo { name: "id".to_string(), is_primary_key: true, ..Default::default() },
+            crate::db::ColumnInfo { name: "name".to_string(), ..Default::default() },
+        ];
+
+        let missing_key =
+            update_existing_primary_key_columns(TableImportConflictPolicy::InsertOrUpdate, &mappings, &target_columns)
+                .unwrap_err();
+        assert!(missing_key.contains("id"));
+
+        let unsupported =
+            validate_update_existing_target(TableImportConflictPolicy::InsertOrUpdate, &DatabaseType::Oracle, false)
+                .unwrap_err();
+        assert!(unsupported.contains("not supported for oracle"));
+
+        let create_table =
+            validate_update_existing_target(TableImportConflictPolicy::InsertOrUpdate, &DatabaseType::Postgres, true)
+                .unwrap_err();
+        assert!(create_table.contains("existing target table"));
+
+        let supported =
+            validate_update_existing_target(TableImportConflictPolicy::InsertOrUpdate, &DatabaseType::Postgres, false)
+                .unwrap();
+        assert_eq!(supported, ());
+    }
+
+    #[test]
+    fn insert_or_update_generates_upsert_clause_sql() {
+        let columns = vec!["tenant_id".to_string(), "id".to_string(), "name".to_string()];
+        let value_rows = vec![
+            "(1, 10, 'alice')".to_string(),
+            "(1, 11, 'bob')".to_string(),
+        ];
+        let batches = crate::data::transfer::generate_primary_key_upsert_sql_batches_from_value_rows(
+            &columns,
+            &value_rows,
+            "users",
+            "public",
+            &DatabaseType::Postgres,
+            None,
+            SqlBatchLimits::for_database(&DatabaseType::Postgres, 2),
+            &["tenant_id".to_string(), "id".to_string()],
+        )
+        .unwrap();
+        let sql = &batches[0].0;
+        assert!(sql.contains("ON CONFLICT (tenant_id, id) DO UPDATE SET"));
+        assert!(sql.contains("name = EXCLUDED.name"));
     }
 
     #[test]

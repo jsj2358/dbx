@@ -125,7 +125,6 @@ import type { QueryEditability } from "@/lib/sql/sqlAnalysis";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 import type {
   ActivePluginSession,
-  ConnectionIdleClosedEvent,
   ConnectionLivenessMessage,
   PluginBinaryEvent,
   PluginConnectionActionResult,
@@ -498,8 +497,6 @@ export interface SnippetSyncSummary {
   bytes: number;
   exportedAt?: string;
   appVersion?: string;
-  remoteContentHash?: string;
-  unchanged: boolean;
   legacyCleanupRequiredId?: string;
 }
 
@@ -512,10 +509,6 @@ export interface SnippetDownloadResult {
 
 export interface SnippetTokenStatus {
   hasSavedToken: boolean;
-}
-
-export interface SnippetPassphraseStatus {
-  hasSavedPassphrase: boolean;
 }
 
 export interface AppSupportInfo {
@@ -543,9 +536,6 @@ export interface QueryPaginationExecutionPlanOptions {
   pagination: QueryPagination;
   useAgentCursor: boolean;
   firstPageUsesActualSql?: boolean;
-  /** Optimizer hint injected into the generated count (dbx_count) and page (dbx_page) SQL.
-   *  Example: GaussDB parallel execution hint: + set(query_dop 8). */
-  executionHint?: string;
 }
 
 export interface QueryPaginationExecutionPlan {
@@ -569,7 +559,6 @@ export interface SortedQuerySqlOptions {
   columnIndex: number;
   column: string;
   direction: QuerySortDirection;
-  tieBreakerColumnIndexes?: number[];
 }
 
 export interface QuerySqlBuildResult {
@@ -876,10 +865,6 @@ export async function deleteAiConfig(configId: string): Promise<void> {
 
 export async function loadCcSwitchAiConfigs(): Promise<CcSwitchImportResult> {
   return invoke("load_cc_switch_ai_configs");
-}
-
-export async function loadMagpieAiConfigs(): Promise<CcSwitchImportResult> {
-  return invoke("load_magpie_ai_configs");
 }
 
 export async function loadAiConfig(): Promise<AiConfig | null> {
@@ -1236,18 +1221,6 @@ export async function forgetSnippetSavedToken(config: SnippetSyncConfig): Promis
   return invoke("forget_snippet_saved_token", { config });
 }
 
-export async function snippetPassphraseStatus(config: SnippetSyncConfig): Promise<SnippetPassphraseStatus> {
-  return invoke("snippet_passphrase_status", { config });
-}
-
-export async function saveSnippetSavedPassphrase(config: SnippetSyncConfig, passphrase: string): Promise<void> {
-  return invoke("save_snippet_saved_passphrase", { config, passphrase });
-}
-
-export async function forgetSnippetSavedPassphrase(config: SnippetSyncConfig): Promise<void> {
-  return invoke("forget_snippet_saved_passphrase", { config });
-}
-
 export async function snippetSyncSettings(provider: SnippetProvider, instanceUrl?: string): Promise<SnippetSyncSettings> {
   return invoke("snippet_sync_settings", { provider, instanceUrl });
 }
@@ -1264,7 +1237,7 @@ export async function snippetSyncInspect(config: SnippetSyncConfig, snippetPassp
   return invoke("snippet_sync_inspect", { config, snippetPassphrase, secretsPassphrase });
 }
 
-export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string, selection?: SyncSelection, expectedRemoteContentHash?: string): Promise<SnippetSyncSummary> {
+export async function snippetSyncUpload(config: SnippetSyncConfig, editorSettings?: unknown, snippetPassphrase?: string, includeSecrets = false, secretsPassphrase?: string, selection?: SyncSelection): Promise<SnippetSyncSummary> {
   return invoke("snippet_sync_upload", {
     config,
     editorSettings,
@@ -1272,7 +1245,6 @@ export async function snippetSyncUpload(config: SnippetSyncConfig, editorSetting
     includeSecrets,
     secretsPassphrase,
     selection,
-    expectedRemoteContentHash,
   });
 }
 
@@ -2509,10 +2481,7 @@ export async function analyzeEditableQueryEditability(sql: string): Promise<Quer
 export interface DataGridSaveGuard {
   sql: string;
   maxMatchedRows: number;
-  /** Set for predicates built from a physical row locator that must still match. */
-  minMatchedRows?: number;
   message: string;
-  minMessage?: string;
 }
 
 export interface BlobBoundStatement {
@@ -3104,16 +3073,6 @@ export async function subscribeConnectionLiveness(onEvent: (event: ConnectionLiv
   return listen<ConnectionLivenessMessage>("dbx-connection-liveness", (event) => onEvent(event.payload));
 }
 
-/**
- * 订阅后端「空闲自动断开」事件（issue #12112）。
- *
- * 后端在连接池因空闲超过 `idle_disconnect_secs` 关闭时发送 `dbx:connection-idle-closed`；
- * 监听器收到的就是载荷本身（前端把该连接标记为未连接并保留已打开页签）。
- */
-export async function subscribeConnectionIdleClosed(onEvent: (event: ConnectionIdleClosedEvent) => void): Promise<UnlistenFn> {
-  return listen<ConnectionIdleClosedEvent>("dbx:connection-idle-closed", (event) => onEvent(event.payload));
-}
-
 export async function listJdbcDrivers(): Promise<JdbcDriverInfo[]> {
   return invoke("list_jdbc_drivers");
 }
@@ -3302,10 +3261,6 @@ export async function saveSavedSqlFile(file: SavedSqlFile): Promise<SavedSqlFile
   return invoke("save_saved_sql_file", { file });
 }
 
-export async function saveDefaultQueryContent(id: string, sql: string, updatedAt: string): Promise<void> {
-  return invoke("save_default_query_content", { id, sql, updatedAt });
-}
-
 export async function deleteSavedSqlFile(id: string): Promise<void> {
   return invoke("delete_saved_sql_file", { id });
 }
@@ -3414,16 +3369,6 @@ export interface McpServerStatus {
 
 export async function checkMcpServerStatus(): Promise<McpServerStatus> {
   return invoke("check_mcp_server_status");
-}
-
-export type McpKeychainAccess = "authorized" | "needs_authorization" | "key_missing" | "unknown" | "not_applicable";
-
-export async function checkMcpKeychainAccess(): Promise<McpKeychainAccess> {
-  return invoke("check_mcp_keychain_access");
-}
-
-export async function authorizeMcpKeychain(): Promise<string> {
-  return invoke("authorize_mcp_keychain");
 }
 
 export async function installMcpServer(): Promise<string> {
@@ -3683,8 +3628,8 @@ export async function redisScanValues(connectionId: string, db: number, cursor: 
   });
 }
 
-export async function redisGetValue(connectionId: string, db: number, keyRaw: string, previewLimitBytes?: number): Promise<RedisValue> {
-  return invoke("redis_get_value", { connectionId, db, keyRaw, previewLimitBytes });
+export async function redisGetValue(connectionId: string, db: number, keyRaw: string): Promise<RedisValue> {
+  return invoke("redis_get_value", { connectionId, db, keyRaw });
 }
 
 export async function redisGetRawValue(connectionId: string, db: number, keyRaw: string): Promise<RedisBlob> {
@@ -5705,10 +5650,7 @@ export async function deleteHistoryEntry(id: string): Promise<void> {
 // --- SQL File Execution ---
 export type SqlFileStatus = "started" | "running" | "statementDone" | "statementFailed" | "done" | "error" | "cancelled";
 
-export type SqlFileEncoding = "auto" | "utf8" | "gbk" | "utf16Le" | "utf16Be";
-
 export interface SqlFileRequest {
-  encoding?: SqlFileEncoding;
   executionId: string;
   connectionId: string;
   database: string;
@@ -5726,8 +5668,8 @@ export interface SqlFileTable {
   name: string;
 }
 
-export async function inspectSqlFileTables(filePath: string, encoding?: SqlFileEncoding): Promise<SqlFileTable[]> {
-  return invoke("inspect_sql_file_tables", { filePath, encoding });
+export async function inspectSqlFileTables(filePath: string): Promise<SqlFileTable[]> {
+  return invoke("inspect_sql_file_tables", { filePath });
 }
 
 export interface SqlFilePreview {
@@ -5740,11 +5682,6 @@ export interface SqlFilePreview {
   packageFilePaths?: string[];
   packagePartCount?: number;
   cleanupToken?: string;
-}
-
-export async function refreshSqlFilePreview(filePath: string, encoding: SqlFileEncoding): Promise<Pick<SqlFilePreview, "preview" | "canExecuteWithoutSelectedDatabase" | "establishesDatabaseContext">> {
-  const result = await previewSqlFile(filePath, encoding);
-  return { preview: result.preview, canExecuteWithoutSelectedDatabase: result.canExecuteWithoutSelectedDatabase, establishesDatabaseContext: result.establishesDatabaseContext };
 }
 
 export async function releaseSqlFilePreview(_cleanupToken: string): Promise<void> {}
@@ -5766,8 +5703,8 @@ export interface SqlFileProgress {
   fileName?: string;
 }
 
-export async function previewSqlFile(filePath: string, encoding?: SqlFileEncoding): Promise<SqlFilePreview> {
-  return invoke("preview_sql_file", { filePath, encoding });
+export async function previewSqlFile(filePath: string): Promise<SqlFilePreview> {
+  return invoke("preview_sql_file", { filePath });
 }
 
 export type SqlFileFailureLogStatus = "available" | "degraded" | "unavailable";
@@ -5858,8 +5795,6 @@ export interface TransferRequest {
   quoteTargetColumnNames: boolean;
   ownershipPolicy?: TransferOwnershipPolicy;
   batchSize: number;
-  /** Per-operation timeout for this transfer. Undefined inherits each connection; 0 disables the limit. */
-  operationTimeoutSecs?: number;
   /**
    * Optional per-source-table transfer filter.
    * Key = source table name; value = a bare `WHERE` predicate
@@ -5923,7 +5858,6 @@ export interface TransferProgress {
 }
 
 export async function startTransfer(request: TransferRequest, onProgress: (progress: TransferProgress) => void, onStarted?: () => void): Promise<void> {
-  const { operationTimeoutSecs, ...backendRequest } = request;
   return new Promise((resolve, reject) => {
     let unlisten: UnlistenFn | null = null;
     void (async () => {
@@ -5937,7 +5871,7 @@ export async function startTransfer(request: TransferRequest, onProgress: (progr
           }
         });
 
-        await invoke("start_transfer", { request: backendRequest, operationTimeoutSecs });
+        await invoke("start_transfer", { request });
         onStarted?.();
       } catch (e) {
         unlisten?.();
@@ -5975,7 +5909,7 @@ export async function sortTablesByFkDependency(options: SortTablesByFkOptions): 
 
 // --- Table File Import ---
 export type TableImportMode = "append" | "truncate";
-export type TableImportConflictPolicy = "error" | "skip" | "updateExisting";
+export type TableImportConflictPolicy = "error" | "skip" | "updateExisting" | "insertOrUpdate";
 export type TableImportStatus = "running" | "done" | "error" | "cancelled";
 export type TableImportPhase = "preparing" | "detectingEncoding" | "reading" | "writing" | "finalizing" | "done";
 export type TableImportSourceFormat = "csv" | "tsv" | "delimited" | "json" | "excel" | "sql" | "parquet";
